@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation Template to publish custom metrics for full vs incremental snapshot copies. Must be deployed in the destination region/account.
+Parameters:
+  LogGroupName:
+    Type: String
+    Default: EBS-copySnapshot
+    Description: (optional) Log Group Name
+  MetricNamespace: 
+    Type: String
+    Default: ebs-custom/CopySnapshot
+    Description: (optional) Metric Namespace
+  LogGroupRetentionDays:
+    Type: Number
+    Default: 30
+    Description: The number of days to retain logs
+  LogGroupKMSKey:
+    Type: String
+    Description: (optional) The ARN for a KMS key used to encrypt the CloudWatch Logs log group.
+Conditions:
+  HasUseKMSKey: !Not [!Equals ["",!Ref LogGroupKMSKey]]
+Resources:
+  CopySnapshotRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EBS Snapshot Notification
+        detail:
+          event:
+            - copySnapshot
+      Name: EBS-copySnapshot
+      State: ENABLED
+      Targets:
+        - Id: CopySnapshotLogGroupTarget
+          Arn: !GetAtt CopySnapshotLogGroup.Arn
+  CopySnapshotLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Ref LogGroupName
+      RetentionInDays:
+        Ref: LogGroupRetentionDays
+      KmsKeyId: 
+        !If [HasUseKMSKey, !Ref LogGroupKMSKey, !Ref "AWS::NoValue"]
+  CopySnapshotFullMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      FilterName: FullSnapshotMetric
+      FilterPattern: '{$.detail.incremental = "false"}'
+      LogGroupName: !Ref CopySnapshotLogGroup
+      MetricTransformations:
+        - 
+          MetricValue: "1"
+          MetricNamespace: !Ref MetricNamespace
+          MetricName: "FullSnapshotCopyCount"
+          Unit: Count
+  CopySnapshotIncrementalMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties: 
+      FilterName: IncrementalSnapshotMetric
+      FilterPattern: '{$.detail.incremental = "true"}'
+      LogGroupName: !Ref CopySnapshotLogGroup
+      MetricTransformations: 
+        - 
+          MetricValue: "1"
+          MetricNamespace: !Ref MetricNamespace
+          MetricName: "IncrementalSnapshotCopyCount"
+          Unit: Count
+  LogGroupForEventsPolicy:
+      Type: AWS::Logs::ResourcePolicy
+      Properties:
+        PolicyName: EventBridgeToCWLogsPolicy
+        PolicyDocument: !Sub >
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "EventBridgetoCWLogsCreateLogStreamPolicy",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": [
+                    "events.amazonaws.com"
+                  ]
+                },
+                "Action": [
+                  "logs:CreateLogStream"
+                ],
+                "Resource": [
+                  "${CopySnapshotLogGroup.Arn}"
+                ]
+              },
+              {
+                "Sid": "EventBridgetoCWLogsPutLogEventsPolicy",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": [
+                    "events.amazonaws.com"
+                  ]
+                },
+                "Action": [
+                  "logs:PutLogEvents"
+                ],
+                "Resource": [
+                  "${CopySnapshotLogGroup.Arn}"
+                ],
+                "Condition": {
+                  "ArnEquals": {"AWS:SourceArn": "${CopySnapshotRule.Arn}"}
+                }
+              }
+            ]
+          }
